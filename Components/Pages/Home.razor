@@ -1,0 +1,223 @@
+﻿# ChatGPT-style Blazor Chat UI
+
+Replace your current `Home.razor` with this version.
+
+```razor
+@page "/"
+@rendermode InteractiveServer
+
+@using PiAssistant.Models
+
+@inject PiAssistant.Services.OllamaService Ollama
+@inject PiAssistant.Services.DatabaseService Database
+@inject PiAssistant.Services.EmbeddingService Embeddings
+
+<PageTitle>Pi Assistant</PageTitle>
+
+<div class="chat-container">
+
+    <div class="messages">
+
+        @foreach (var message in Messages)
+        {
+            <div class="message-row @(message.Role == "User" ? "user-row" : "assistant-row")">
+
+                <div class="message-bubble @(message.Role == "User" ? "user-bubble" : "assistant-bubble")">
+
+                    <div class="message-role">
+                        @message.Role
+                    </div>
+
+                    <div class="message-content">
+                        @message.Content
+                    </div>
+
+                </div>
+
+            </div>
+        }
+
+    </div>
+
+    <div class="input-area">
+
+        <textarea class="prompt-box"
+                  @bind="Prompt"
+                  @bind:event="oninput"
+                  placeholder="Send a message...">
+        </textarea>
+
+        <button class="send-button"
+                @onclick="Ask">
+            Send
+        </button>
+
+    </div>
+
+</div>
+
+<style>
+
+    .chat-container {
+        display: flex;
+        flex-direction: column;
+        height: 90vh;
+        max-width: 1000px;
+        margin: auto;
+        padding: 20px;
+    }
+
+    .messages {
+        flex: 1;
+        overflow-y: auto;
+        padding: 20px;
+        border: 1px solid #333;
+        border-radius: 10px;
+        background: #111;
+    }
+
+    .message-row {
+        display: flex;
+        margin-bottom: 20px;
+    }
+
+    .user-row {
+        justify-content: flex-end;
+    }
+
+    .assistant-row {
+        justify-content: flex-start;
+    }
+
+    .message-bubble {
+        max-width: 80%;
+        padding: 15px;
+        border-radius: 16px;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+    }
+
+    .user-bubble {
+        background: #2563eb;
+        color: white;
+    }
+
+    .assistant-bubble {
+        background: #222;
+        color: white;
+    }
+
+    .message-role {
+        font-size: 0.8rem;
+        opacity: 0.7;
+        margin-bottom: 8px;
+    }
+
+    .message-content {
+        line-height: 1.5;
+    }
+
+    .input-area {
+        display: flex;
+        gap: 10px;
+        margin-top: 20px;
+    }
+
+    .prompt-box {
+        flex: 1;
+        height: 80px;
+        padding: 15px;
+        border-radius: 12px;
+        border: 1px solid #444;
+        background: #1a1a1a;
+        color: white;
+        resize: none;
+        font-size: 1rem;
+    }
+
+    .send-button {
+        width: 120px;
+        border: none;
+        border-radius: 12px;
+        background: #2563eb;
+        color: white;
+        font-size: 1rem;
+        cursor: pointer;
+    }
+
+    .send-button:hover {
+        background: #1d4ed8;
+    }
+
+</style>
+
+@code {
+
+    private string Prompt = "";
+
+    private List<ChatMessage> Messages = new();
+
+    protected override void OnInitialized()
+    {
+        Messages = Database.GetMessages();
+    }
+
+    private async Task Ask()
+    {
+        if (string.IsNullOrWhiteSpace(Prompt))
+            return;
+
+        var currentPrompt = Prompt;
+
+        Prompt = "";
+
+        var userMessage = new ChatMessage
+        {
+            Role = "User",
+            Content = currentPrompt
+        };
+
+        Messages.Add(userMessage);
+
+        Database.SaveMessage(userMessage);
+
+        var embedding =
+            await Embeddings.GenerateEmbedding(currentPrompt);
+
+        Database.SaveMemory(currentPrompt, embedding);
+
+        var memories = Database.GetMemories();
+
+        var memoryContext =
+            string.Join("\n", memories);
+
+        var enhancedPrompt =
+            "Relevant memories:\n" +
+            memoryContext +
+            "\n\nUser:\n" +
+            currentPrompt;
+
+        var assistantMessage = new ChatMessage
+        {
+            Role = "Assistant",
+            Content = ""
+        };
+
+        Messages.Add(assistantMessage);
+
+        StateHasChanged();
+
+        await foreach (
+            var chunk
+            in Ollama.AskStreamAsync(enhancedPrompt))
+        {
+            assistantMessage.Content += chunk;
+
+            await InvokeAsync(StateHasChanged);
+        }
+
+        Database.SaveMessage(assistantMessage);
+    }
+}
+```
+
