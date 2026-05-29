@@ -67,6 +67,28 @@ CREATE TABLE IF NOT EXISTS Memories (
         command.ExecuteNonQuery();
     }
 
+    private double CosineSimilarity(List<float> vectorA, List<float> vectorB)
+    {
+        double dotProduct = 0;
+        double magnitudeA = 0;
+        double magnitudeB = 0;
+
+        for (int i = 0; i < vectorA.Count; i++)
+        {
+            dotProduct += vectorA[i] * vectorB[i];
+            magnitudeA += Math.Pow(vectorA[i], 2);
+            magnitudeB += Math.Pow(vectorB[i], 2);
+        }
+
+        magnitudeA = Math.Sqrt(magnitudeA);
+        magnitudeB = Math.Sqrt(magnitudeB);
+
+        if (magnitudeA == 0 || magnitudeB == 0)
+            return 0;
+
+        return dotProduct / (magnitudeA * magnitudeB);
+    }
+
     public List<ChatMessage> GetMessages()
     {
         var messages = new List<ChatMessage>();
@@ -127,32 +149,33 @@ CREATE TABLE IF NOT EXISTS Memories (
     command.ExecuteNonQuery();
 }
 
-public List<string> GetMemories()
-{
-    var memories = new List<string>();
-
-    using var connection =
-        new SqliteConnection(_connectionString);
-
-    connection.Open();
-
-    var command = connection.CreateCommand();
-
-    command.CommandText =
-    @"
-    SELECT Content
-    FROM Memories
-    ORDER BY Id DESC
-    LIMIT 5
-    ";
-
-    using var reader = command.ExecuteReader();
-
-    while (reader.Read())
+public List<string> GetRelevantMemories(List<float> queryEmbedding, int top = 5)
     {
-        memories.Add(reader.GetString(0));
-    }
+        var results = new List<(string Content, double score)>();
+        using var connection =
+            new SqliteConnection(_connectionString);
+        connection.Open();
+        var command = connection.CreateCommand();
+        command.CommandText =
+        @"
+        SELECT Content, Embedding
+        FROM Memories
+        ";
+        using var reader = command.ExecuteReader();
+        while (reader.Read())        {
+            var content = reader.GetString(0);
+            var embeddingStr = reader.GetString(1);
+            var embedding = embeddingStr.Split(',').Select(float.Parse).ToList();
+            var score = CosineSimilarity(queryEmbedding, embedding);
+            results.Add((content, score));      
 
-    return memories;
-}
+
+        }
+        return results
+            .OrderByDescending(r => r.score)
+            .Take(top)
+            .Select(r => r.Content)
+            .ToList();  
+    }
+  
 }

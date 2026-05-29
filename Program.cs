@@ -8,6 +8,9 @@ builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();
 builder.Services.AddSingleton<DatabaseService>();
 builder.Services.AddScoped<EmbeddingService>();
+builder.Services.AddScoped<SystemPromptService>();
+builder.Services.AddSingleton<ToolRegistry>();
+builder.Services.AddSingleton<ToolExecutor>();
 builder.Services.AddHttpClient();
 builder.Services.AddHttpClient<OllamaService>(client =>
 {

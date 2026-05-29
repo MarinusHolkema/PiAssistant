@@ -1,17 +1,18 @@
 ﻿@page "/"
 @rendermode InteractiveServer
-
+@inject IJSRuntime JS
+@inject PiAssistant.Services.SystemPromptService SystemPrompt
 @using PiAssistant.Models
-
+@using Markdig
 @inject PiAssistant.Services.OllamaService Ollama
 @inject PiAssistant.Services.DatabaseService Database
 @inject PiAssistant.Services.EmbeddingService Embeddings
-
+@inject PiAssistant.Services.ToolExecutor ToolExecutor
 <PageTitle>Pi Assistant</PageTitle>
 
 <div class="chat-container">
 
-    <div class="messages">
+    <div class="messages" @ref="chatContainer">
 
         @foreach (var message in Messages)
         {
@@ -23,8 +24,8 @@
                         @message.Role
                     </div>
 
-                    <div class="message-content">
-                        @message.Content
+                    <div class="message-content markdown-body">
+                        @((MarkupString)Markdown.ToHtml(message.Content))
                     </div>
 
                 </div>
@@ -36,14 +37,10 @@
 
     <div class="input-area">
 
-        <textarea class="prompt-box"
-                  @bind="Prompt"
-                  @bind:event="oninput"
-                  placeholder="Send a message...">
+        <textarea class="prompt-box" @bind="Prompt" @bind:event="oninput" placeholder="Send a message...">
         </textarea>
 
-        <button class="send-button"
-                @onclick="Ask">
+        <button class="send-button" @onclick="Ask">
             Send
         </button>
 
@@ -52,7 +49,6 @@
 </div>
 
 <style>
-
     .chat-container {
         display: flex;
         flex-direction: column;
@@ -144,10 +140,56 @@
         background: #1d4ed8;
     }
 
+    .markdown-body h1,
+    .markdown-body h2,
+    .markdown-body h3 {
+        margin-top: 20px;
+        margin-bottom: 10px;
+    }
+
+    .markdown-body p {
+        margin-bottom: 12px;
+    }
+
+    .markdown-body code {
+        background: #111;
+        padding: 2px 6px;
+        border-radius: 6px;
+        font-family: monospace;
+    }
+
+    .markdown-body pre {
+        background: #0d1117;
+        padding: 15px;
+        border-radius: 10px;
+        overflow-x: auto;
+        margin-top: 10px;
+        margin-bottom: 10px;
+    }
+
+    .markdown-body pre code {
+        background: transparent;
+        padding: 0;
+    }
+
+    .markdown-body ul {
+        margin-left: 20px;
+    }
+
+    .markdown-body li {
+        margin-bottom: 6px;
+    }
+
+    .markdown-body blockquote {
+        border-left: 4px solid #555;
+        padding-left: 12px;
+        color: #aaa;
+        margin-left: 0;
+    }
 </style>
 
 @code {
-
+    private ElementReference chatContainer;
     private string Prompt = "";
 
     private List<ChatMessage> Messages = new();
@@ -157,62 +199,139 @@
         Messages = Database.GetMessages();
     }
 
-    private async Task Ask()
+    protected override async Task OnAfterRenderAsync(bool firstRender)
     {
-        if (string.IsNullOrWhiteSpace(Prompt))
-            return;
-
-        var currentPrompt = Prompt;
-
-        Prompt = "";
-
-        var userMessage = new ChatMessage
+        if (firstRender)
         {
-            Role = "User",
-            Content = currentPrompt
-        };
+            Messages = Database.GetMessages();
+            await InvokeAsync(StateHasChanged);
+            await ScrollToBottom();
+        }
+    }
 
-        Messages.Add(userMessage);
+    private async Task ScrollToBottom()
+    {
+        await JS.InvokeVoidAsync("scrollChatToBottom", chatContainer);
+    }
+private async Task Ask()
+{
+    if (string.IsNullOrWhiteSpace(Prompt))
+        return;
 
-        Database.SaveMessage(userMessage);
+    var userPrompt = Prompt;
 
-        var embedding =
-            await Embeddings.GenerateEmbedding(currentPrompt);
+    Prompt = "";
 
-        Database.SaveMemory(currentPrompt, embedding);
+    var userMessage = new ChatMessage
+    {
+        Role = "User",
+        Content = userPrompt
+    };
 
-        var memories = Database.GetMemories();
+    Messages.Add(userMessage);
 
-        var memoryContext =
-            string.Join("\n", memories);
+    Database.SaveMessage(userMessage);
 
-        var enhancedPrompt =
-            "Relevant memories:\n" +
-            memoryContext +
-            "\n\nUser:\n" +
-            currentPrompt;
+    await InvokeAsync(StateHasChanged);
 
-        var assistantMessage = new ChatMessage
-        {
-            Role = "Assistant",
-            Content = ""
-        };
+    await ScrollToBottom();
 
-        Messages.Add(assistantMessage);
+    // Generate embedding
+    var embedding =
+        await Embeddings.GenerateEmbedding(
+            userPrompt);
 
-        StateHasChanged();
+    // Save memory
+    Database.SaveMemory(
+        userPrompt,
+        embedding);
 
+    // Retrieve relevant memories
+    var memories =
+        Database.GetRelevantMemories(
+            embedding);
+
+    var memoryContext =
+        string.Join("\n", memories);
+
+    // Build enhanced prompt
+    var enhancedPrompt =
+        SystemPrompt.GetSystemPrompt() +
+        "\n\nRelevant memories:\n" +
+        memoryContext +
+        "\n\nUser:\n" +
+        userPrompt;
+
+    var assistantMessage = new ChatMessage
+    {
+        Role = "Assistant",
+        Content = ""
+    };
+
+    Messages.Add(assistantMessage);
+
+    await InvokeAsync(StateHasChanged);
+
+    await ScrollToBottom();
+
+    // Agent loop
+    var currentPrompt = enhancedPrompt;
+
+    for (int i = 0; i < 5; i++)
+    {
+        var response = "";
+
+        // Stream model response
         await foreach (
             var chunk
-            in Ollama.AskStreamAsync(enhancedPrompt))
+            in Ollama.AskStreamAsync(currentPrompt))
         {
-            assistantMessage.Content += chunk;
+            response += chunk;
+
+            assistantMessage.Content = response;
 
             await InvokeAsync(StateHasChanged);
+
+            await ScrollToBottom();
         }
 
-        Database.SaveMessage(assistantMessage);
+        // Try tool execution
+        var toolResult =
+            await ToolExecutor.TryExecuteTool(
+                response);
+
+        // No tool → final answer
+        if (toolResult == null)
+        {
+            assistantMessage.Content = response;
+
+            await InvokeAsync(StateHasChanged);
+
+            await ScrollToBottom();
+
+            break;
+        }
+
+        // Show tool execution status
+        assistantMessage.Content =
+            $"Using tool...\n\n{toolResult}";
+
+        await InvokeAsync(StateHasChanged);
+
+        await ScrollToBottom();
+
+        // Continue agent loop
+        currentPrompt =
+            "Tool result:\n" +
+            toolResult +
+            "\n\n" +
+            "You may:\n" +
+            "- use another tool\n" +
+            "- or answer naturally";
     }
+
+    Database.SaveMessage(assistantMessage);
+}
 }
 ```
 
